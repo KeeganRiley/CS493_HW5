@@ -65,8 +65,8 @@ def handle_auth_error(ex):
     response.status_code = ex.status_code
     return response
 
-# Verify the JWT in the request's Authorization header
 def verify_jwt(request):
+    """Verify the JWT in the request's Authorization header."""
     if 'Authorization' in request.headers:
         auth_header = request.headers['Authorization'].split()
         token = auth_header[1]
@@ -128,24 +128,23 @@ def verify_jwt(request):
                             "description":
                                 "No RSA key in JWKS"}, 401)
 
-
 @app.route('/')
 def index():
     return "Please navigate to /businesses to use this API"\
 
-# Create a business if the Authorization header contains a valid JWT
-@app.route('/businesses', methods=['POST'])
-def post_business():
-    if request.method == 'POST':
-        payload = verify_jwt(request)
-        content = request.get_json()
-        new_business = datastore.entity.Entity(key=client.key(BUSINESSES))
-        new_business.update({"name": content["name"], "description": content["description"],
-          "price": content["price"]})
-        client.put(new_business)
-        return jsonify(id=new_business.key.id)
-    else:
-        return jsonify(error='Method not recogonized')
+# # Create a business if the Authorization header contains a valid JWT
+# @app.route('/businesses', methods=['POST'])
+# def post_business():
+#     if request.method == 'POST':
+#         payload = verify_jwt(request)
+#         content = request.get_json()
+#         new_business = datastore.entity.Entity(key=client.key(BUSINESSES))
+#         new_business.update({"name": content["name"], "description": content["description"],
+#           "price": content["price"]})
+#         client.put(new_business)
+#         return jsonify(id=new_business.key.id)
+#     else:
+#         return jsonify(error='Method not recogonized')
 
 # Endpoint 3. Create a business.
 @app.route('/' + BUSINESSES, methods=['POST'])
@@ -175,7 +174,7 @@ def post_businesses():
         # Append id, owner_id, and self (url) for response.
         new_business['id'] = new_business.key.id
         # new_business['owner_id'] = payload["sub"]
-        self_url = get_hostname() + '/' + BUSINESSES + str(new_business['id'])
+        self_url = get_hostname() + '/' + BUSINESSES + '/' + str(new_business['id'])
         new_business['self'] = self_url
         return new_business, 201
     else:
@@ -187,16 +186,16 @@ def post_businesses():
 def get_business(business_id):
     """Allows you to get an existing business."""
     # Check business exists.
-    if request.method == 'POST':
+    if request.method == 'GET':
         payload = verify_jwt(request)
 
         business_key = client.key(BUSINESSES, business_id)
         business = client.get(key=business_key)
-        if business is None:
+        if business is None or business['owner_id'] != payload['sub']:
             return ERROR_BUSINESS_NOT_FOUND, 403
 
         business['id'] = business.key.id
-        self_url = get_hostname() + '/' + BUSINESSES + str(business['id'])
+        self_url = get_hostname() + '/' + BUSINESSES + '/' + str(business['id'])
         business['self'] = self_url
 
         return business
@@ -209,26 +208,27 @@ def get_business(business_id):
 def get_businesses():
     """List the businesses for an owner, or all businesses."""
     # If JWT is valid and included.
-    if request.method == 'POST':
-        payload = verify_jwt(request)
-        query = client.query(kind=BUSINESSES)
-        query.add_filter('owner_id', '=', payload['sub'])
+    if request.method == 'GET':
+        try:
+            payload = verify_jwt(request)
+            query = client.query(kind=BUSINESSES)
+            query.add_filter('owner_id', '=', payload['sub'])
 
-        results = list(query.fetch())
-        for business in results:
-            business['id'] = business.key.id
-            self_url = get_hostname() + '/' + BUSINESSES + str(business['id'])
-            business['self'] = self_url
+            results = list(query.fetch())
+            for business in results:
+                business['id'] = business.key.id
+                self_url = get_hostname() + '/' + BUSINESSES + '/' + str(business['id'])
+                business['self'] = self_url
 
     # If JWT is invalid or not included.
-    else:
-        query = client.query(kind=BUSINESSES)
-        results = list(query.fetch())
-        for business in results:
-            business['id'] = business.key.id
-            self_url = get_hostname() + '/' + BUSINESSES + str(business['id'])
-            business['self'] = self_url
-            del business['inspection_score']
+        except AuthError:
+            query = client.query(kind=BUSINESSES)
+            results = list(query.fetch())
+            for business in results:
+                business['id'] = business.key.id
+                self_url = get_hostname() + '/' + BUSINESSES + '/' + str(business['id'])
+                business['self'] = self_url
+                del business['inspection_score']
 
     return results if results is not None else []
 
@@ -241,26 +241,39 @@ def delete_business(business_id):
     also deletes those reviews.
     """
     # Check business exists.
-    business_key = client.key(BUSINESSES, business_id)
-    business = client.get(key=business_key)
-    if business is None:
-        return ERROR_BUSINESS_NOT_FOUND, 404
+    if request.method == 'DELETE':
+        payload = verify_jwt(request)
 
-    client.delete(business_key)
-    return '', 204
+        business_key = client.key(BUSINESSES, business_id)
+        business = client.get(key=business_key)
+        if business is None or business['owner_id'] != payload['sub']:
+            return ERROR_BUSINESS_NOT_FOUND, 403
 
-# Decode the JWT supplied in the Authorization header
+        client.delete(business_key)
+        return '', 204
+    else:
+        return jsonify(error='Method not recogonized')
+
+# Endpoint 2. Decode a JWT
 @app.route('/decode', methods=['GET'])
 def decode_jwt():
+    """Decode a valid JWT provided as a Bearer token.
+    
+    Decode the JWT supplied in the Authorization header
+    """
     payload = verify_jwt(request)
     return payload
 
-# Generate a JWT from the Auth0 domain and return it
-# Request: JSON body with 2 properties with "username" and "password"
-#       of a user registered with this Auth0 domain
-# Response: JSON with the JWT as the value of the property id_token
+# Endpoint 1. Generate a JWT
 @app.route('/login', methods=['POST'])
 def login_user():
+    """Generate a JWT. 
+    
+    Generate a JWT from the Auth0 domain and return it
+    Request: JSON body with 2 properties with "username" and "password"
+        of a user registered with this Auth0 domain
+    Response: JSON with the JWT as the value of the property id_token
+    """
     content = request.get_json()
     username = content["username"]
     password = content["password"]
@@ -277,4 +290,3 @@ def login_user():
 
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=8080, debug=True)
-
