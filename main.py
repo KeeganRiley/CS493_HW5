@@ -14,6 +14,8 @@ app.secret_key = 'SECRET_KEY'
 client = datastore.Client()
 
 BUSINESSES = "businesses"
+ERROR_MISSING_ATTRIBUTE = {"Error": "The request body is missing at least one of the required attributes"}
+ERROR_BUSINESS_NOT_FOUND = {"Error": "No business with this business_id exists"}
 
 # Update the values of the following 3 variables
 CLIENT_ID = 'NOkJU0RZwqdTDAejJ9eKBdgEoJ8nAIW8'
@@ -46,6 +48,16 @@ class AuthError(Exception):
         self.error = error
         self.status_code = status_code
 
+def missing_attr(content, required_attributes):
+    """Helper function to verify required number of attributes."""
+    for attribute in required_attributes:
+        if attribute not in content:
+            return True
+    return False
+
+def get_hostname():
+    """Return the hostname url including the scheme."""
+    return request.host_url.strip('/')
 
 @app.errorhandler(AuthError)
 def handle_auth_error(ex):
@@ -135,12 +147,113 @@ def post_business():
     else:
         return jsonify(error='Method not recogonized')
 
+# Endpoint 3. Create a business.
+@app.route('/' + BUSINESSES, methods=['POST'])
+def post_businesses():
+    """Allows you to create a new business."""
+    req_attr = ['name', 'street_address', 'city', 'state', 'zip_code', 'inspection_score']
+    content = request.get_json()
+    if missing_attr(content, req_attr):
+        return ERROR_MISSING_ATTRIBUTE, 400
+
+    if request.method == 'POST':
+        payload = verify_jwt(request)
+
+        new_key = client.key(BUSINESSES)
+        new_business = datastore.Entity(key=new_key)
+        new_business.update({
+            'owner_id': payload['sub'],
+            'name': content['name'],
+            'street_address': content['street_address'],
+            'city': content['city'],
+            'state': content['state'],
+            'zip_code': content['zip_code'],
+            'inspection_score': content['inspection_score']
+        })
+        client.put(new_business)
+
+        # Append id, owner_id, and self (url) for response.
+        new_business['id'] = new_business.key.id
+        # new_business['owner_id'] = payload["sub"]
+        self_url = get_hostname() + '/' + BUSINESSES + str(new_business['id'])
+        new_business['self'] = self_url
+        return new_business, 201
+    else:
+        return jsonify(error='Method not recogonized')
+
+
+# Endpoint 4. Get a business.
+@app.route('/' + BUSINESSES + '/<int:business_id>', methods=['GET'])
+def get_business(business_id):
+    """Allows you to get an existing business."""
+    # Check business exists.
+    if request.method == 'POST':
+        payload = verify_jwt(request)
+
+        business_key = client.key(BUSINESSES, business_id)
+        business = client.get(key=business_key)
+        if business is None:
+            return ERROR_BUSINESS_NOT_FOUND, 403
+
+        business['id'] = business.key.id
+        self_url = get_hostname() + '/' + BUSINESSES + str(business['id'])
+        business['self'] = self_url
+
+        return business
+    else:
+        return jsonify(error='Method not recogonized')
+
+
+# Endpoint 5. List businesses.
+@app.route('/' + BUSINESSES, methods=['GET'])
+def get_businesses():
+    """List the businesses for an owner, or all businesses."""
+    # If JWT is valid and included.
+    if request.method == 'POST':
+        payload = verify_jwt(request)
+        query = client.query(kind=BUSINESSES)
+        query.add_filter('owner_id', '=', payload['sub'])
+
+        results = list(query.fetch())
+        for business in results:
+            business['id'] = business.key.id
+            self_url = get_hostname() + '/' + BUSINESSES + str(business['id'])
+            business['self'] = self_url
+
+    # If JWT is invalid or not included.
+    else:
+        query = client.query(kind=BUSINESSES)
+        results = list(query.fetch())
+        for business in results:
+            business['id'] = business.key.id
+            self_url = get_hostname() + '/' + BUSINESSES + str(business['id'])
+            business['self'] = self_url
+            del business['inspection_score']
+
+    return results if results is not None else []
+
+# Endpoint 6. Delete a business, also deletes any reviews written for this business.
+@app.route('/' + BUSINESSES + '/<int:business_id>', methods=['DELETE'])
+def delete_business(business_id):
+    """Allows you to delete a business. 
+    
+    Note that if there are any reviews for a business, deleting the business
+    also deletes those reviews.
+    """
+    # Check business exists.
+    business_key = client.key(BUSINESSES, business_id)
+    business = client.get(key=business_key)
+    if business is None:
+        return ERROR_BUSINESS_NOT_FOUND, 404
+
+    client.delete(business_key)
+    return '', 204
+
 # Decode the JWT supplied in the Authorization header
 @app.route('/decode', methods=['GET'])
 def decode_jwt():
     payload = verify_jwt(request)
-    return payload          
-        
+    return payload
 
 # Generate a JWT from the Auth0 domain and return it
 # Request: JSON body with 2 properties with "username" and "password"
